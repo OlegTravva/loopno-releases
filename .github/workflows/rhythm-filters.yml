@@ -1,0 +1,40 @@
+name: Generate rhythm filters
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '23 3 * * *'
+permissions:
+  contents: write
+concurrency:
+  group: rhythm-filters
+jobs:
+  generate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - name: Generate and publish filter variations
+        env:
+          GEMINI_KEY: ${{ secrets.LOOPNO_GEMINI_API_KEY }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          node --input-type=module <<'JS'
+          import {writeFileSync} from 'node:fs';
+          const categories={'ru-rap':'Русский рэп',energy:'Получить заряд',quiet:'Спокойнее',pop:'Поп','world-rap':'Зарубежный рэп',rock:'Гитары',electronic:'Электроника',fresh:'Новинки',familiar:'Знакомые артисты',discover:'Новые артисты'};
+          const model='gemini-3.5-flash-lite';
+          const response=await fetch('https://generativelanguage.googleapis.com/v1beta/models/'+model+':generateContent',{
+            method:'POST',headers:{'Content-Type':'application/json','x-goog-api-key':process.env.GEMINI_KEY},signal:AbortSignal.timeout(15000),
+            body:JSON.stringify({contents:[{parts:[{text:'Верни JSON: четыре разных массива из шести объектов {id,label}. Используй только эти категории: '+JSON.stringify(categories)+'. Названия на русском до 22 символов, не меняй значение категории. Не повторяй ID в одном массиве.'}]}],generationConfig:{responseMimeType:'application/json',maxOutputTokens:1500,temperature:.8}})
+          });
+          if(!response.ok)throw Error('Gemini HTTP '+response.status);
+          const data=await response.json();
+          const raw=JSON.parse(data.candidates?.[0]?.content?.parts?.map(p=>p.text).join('')||'null');
+          if(!Array.isArray(raw))throw Error('Invalid response');
+          const variants=raw.slice(0,4).filter(Array.isArray).map(group=>[...new Map(group.filter(row=>row&&Object.hasOwn(categories,row.id)&&typeof row.label==='string'&&/^[\p{L}\p{N} $&-]{2,22}$/u.test(row.label)).map(row=>[row.id,{id:row.id,label:row.label}])).values()].slice(0,6)).filter(group=>group.length>=4);
+          if(variants.length<2)throw Error('Insufficient filter variations');
+          writeFileSync('rhythm-filters.json',JSON.stringify({version:1,model,generatedAt:new Date().toISOString(),variants})+'\n');
+          JS
+          endpoint="repos/$GITHUB_REPOSITORY/contents/rhythm-filters.json"
+          sha=$(gh api "$endpoint" --jq .sha 2>/dev/null || true)
+          args=()
+          if [[ -n "$sha" ]]; then args+=(-f "sha=$sha"); fi
+          gh api --method PUT "$endpoint" -f 'message=Refresh rhythm filters' -f "content=$(base64 -w0 rhythm-filters.json)" "${args[@]}" --silent
